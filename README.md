@@ -8,8 +8,11 @@ I wanted a minimal slideshow with modern animations like Apple’s screensavers,
 
 ![Origami animation with New Zealand and Netherlands photographs folding between full-screen and grid layouts](docs/origami-preview.gif)
 
-Six animation styles, an optional clock and date, and a visual editor for your Home Assistant dashboard. This card requires its sister integration also to be installed to connect photo sources such as Apple photos, google photos and many more.
+Six animation styles, an optional clock and date, and a visual editor for your Home Assistant dashboard.
 
+**This card requires its sister integration also to be installed to connect photo sources such as Apple photos, google photos and many more.**
+
+### [minimal-slideshow-integration](https://github.com/lukevink/minimal-slideshow-integration)
 
 ## Animation styles
 
