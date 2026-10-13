@@ -1,4 +1,4 @@
-/* Minimal Photo Slideshow v1.2.0 — Home Assistant photo card. Photos stay in this browser's memory.
+/* Minimal Photo Slideshow v1.3.0 — Home Assistant photo card. Photos stay in this browser's memory.
  * Source: individual photos through Home Assistant or a user-provided URL list.
  * Original implementation; not Apple's screensaver code.
  */
@@ -20,6 +20,36 @@ const layouts = [
   [[0,0,1/3,1],[1/3,0,1/3,1],[2/3,0,1/3,1]]
 ];
 const sameRect=(a,b)=>a.every((v,i)=>Math.abs(v-b[i])<.00001);
+// Older configurations are converted once; all execution uses HA's action dispatcher.
+export function normalizeActions(config){
+  const {home_path,slideshow_minutes,...result}=config;
+  if(result.tap_action==='none')result.tap_action={action:'none'};
+  else if(result.tap_action===undefined&&typeof home_path==='string'&&home_path.startsWith('/')&&!home_path.startsWith('//'))result.tap_action={action:'navigate',navigation_path:home_path};
+  for(const key of ['tap_action','hold_action','double_tap_action']){
+    result[key]=result[key]??{action:'none'};
+    if(typeof result[key]!=='object'||Array.isArray(result[key])||typeof result[key].action!=='string')throw new Error(`${key} must be a Home Assistant action object.`);
+  }
+  return result;
+}
+// Private photos remain in tab memory. Cap the shared return-to-card buffer.
+const photoBuffers=new Map(),BUFFER_BYTES=48*1024*1024,BUFFER_TTL=10*60*1000;
+function trimPhotoBuffers(){
+  for(const [key,value] of photoBuffers)if(Date.now()-value.savedAt>BUFFER_TTL){clearTimeout(value.expiry);photoBuffers.delete(key);}
+  let bytes=[...photoBuffers.values()].reduce((sum,value)=>sum+value.bytes,0);
+  for(const [key,value] of photoBuffers){if(bytes<=BUFFER_BYTES&&photoBuffers.size<=2)break;bytes-=value.bytes;clearTimeout(value.expiry);photoBuffers.delete(key);}
+}
+let nativeCardPromise;
+async function nativeButtonCard(){
+  if(customElements.get('hui-button-card'))return customElements.get('hui-button-card');
+  if(!window.loadCardHelpers)return null;
+  if(!nativeCardPromise)nativeCardPromise=window.loadCardHelpers().then(async helpers=>{
+    helpers.createCardElement({type:'button'});
+    await customElements.whenDefined('hui-button-card');
+    return customElements.get('hui-button-card');
+  }).catch(error=>{nativeCardPromise=null;throw error;});
+  return nativeCardPromise;
+}
+
 const style = `
  :host{display:block;height:100%;min-height:0}
  ha-card{position:relative;display:block;overflow:hidden;height:var(--origami-height,calc(100dvh - var(--header-height,0px)));background:#080808;border:0;border-radius:0;box-shadow:none;touch-action:manipulation;isolation:isolate}
@@ -43,36 +73,36 @@ export class OrigamiAlbumCard extends HTMLElement {
     super(); this.attachShadow({mode:'open'}); this._photos=[]; this._serial=0; this._turn=0; this._layoutStep=0;
     this._animations=[]; this._visible=true;this._history=[];this._historyIndex=-1;this._commandQueue=Promise.resolve();
     this._visibility=()=>{this._finish();this._schedule();this._load();};
-    this.shadowRoot.innerHTML=`<style>${style}</style><ha-card><div class="stage" role="button" tabindex="0" aria-label="Return to active dashboard"><div class="scene"></div><div class="folds"></div><div class="status">Connecting to your album…</div></div></ha-card>`;
+    this.shadowRoot.innerHTML=`<style>${style}</style><ha-card><div class="stage" role="button" tabindex="0" aria-label="Slideshow actions"><div class="scene"></div><div class="folds"></div><div class="status">Connecting to your album…</div></div></ha-card>`;
     this._stage=this.shadowRoot.querySelector('.stage');
     this._scene=this.shadowRoot.querySelector('.scene');
     this._folds=this.shadowRoot.querySelector('.folds');
     this._status=this.shadowRoot.querySelector('.status');
-    this._stage.addEventListener('click',()=>this._exit());
-    this._stage.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();this._exit();}});
+    this._stage.addEventListener('action',event=>{event.stopPropagation();this._handleAction(event.detail?.action);});
   }
   setConfig(config){
+    config=normalizeActions(config);
     if(config.source&&!['minimal_slideshow','origami_photos'].includes(config.source)) throw new Error('Unknown photo source.');
     if(this._config?.source!==config.source||this._config?.album_id!==config.album_id||JSON.stringify(this._config?.images)!==JSON.stringify(config.images)) this._clear();
     this._config={...config,interval:clamp(config.interval||8,2,120),duration:clamp(config.duration||1800,250,6000)};
     this.shadowRoot.querySelector('ha-card').style.setProperty('--origami-height', config.height || 'calc(100dvh - var(--header-height,0px))');
-    this._load(); this._schedule();
+    this._bindActions();this._load(); this._schedule();
   }
-  set hass(hass){this._hass=hass;this._subscribeControls();this._load();}
+  set hass(hass){if(this._hass&&this._hass.user?.id!==hass.user?.id)this._clear();this._hass=hass;this._subscribeControls();this._load();}
   get hass(){return this._hass;}
   connectedCallback(){
-    document.addEventListener('visibilitychange',this._visibility);this._subscribeControls();
+    document.addEventListener('visibilitychange',this._visibility);this._bindActions();this._subscribeControls();
     this._observer=new IntersectionObserver(entries=>{this._visible=entries[0].isIntersecting;if(!this._visible)this._finish();this._schedule();if(this._visible)this._load();});
     this._observer.observe(this);this._resize=new ResizeObserver(()=>{if(this._mosaicMode()&&this._current?.length===1&&!this._screenMatch(this._current[0].photo)&&this._photos.length>=2){this._finish();const next=this._chooseLayout();if(next){this._current=next;this._scene.replaceChildren(this._render(next));}}});this._resize.observe(this._stage);this._load();this._schedule();
   }
-  disconnectedCallback(){this._controlGeneration=(this._controlGeneration||0)+1;this._unsubscribeControls?.();this._unsubscribeControls=null;this._controlConnection=null;document.removeEventListener('visibilitychange',this._visibility);this._observer?.disconnect();this._resize?.disconnect();this._clear();}
+  disconnectedCallback(){this._actionHandler?.bind(this._stage,{disabled:true});this._controlGeneration=(this._controlGeneration||0)+1;this._unsubscribeControls?.();this._unsubscribeControls=null;this._controlConnection=null;document.removeEventListener('visibilitychange',this._visibility);this._observer?.disconnect();this._resize?.disconnect();this._clear();}
   _clear(){
-    clearTimeout(this._timer);clearTimeout(this._retry);clearTimeout(this._prefetch);this._request?.abort();this._serial++;this._finish();
+    clearTimeout(this._timer);clearTimeout(this._retry);clearTimeout(this._prefetch);this._request?.abort();for(const request of this._requests||[])request.abort();this._requests=new Set();this._serial++;this._finish();this._saveBuffer();
     for(const p of this._photos)URL.revokeObjectURL(p.url);
-    this._photos=[];this._history=[];this._historyIndex=-1;this._resolvedAlbum=null;this._current=null;this._frame=null;this._loading=null;this._catalog=null;this._scene?.replaceChildren();this._message("Connecting to your album…");
+    this._photos=[];this._history=[];this._historyIndex=-1;this._resolvedAlbum=null;this._current=null;this._frame=null;this._loading=null;this._catalog=null;this._bufferChecked=false;this._nextLoad=0;this._failedPhotos=new Map();this._scene?.replaceChildren();this._message("Connecting to your album…");
   }
   _message(text){this._status.textContent=text;this._status.hidden=false;}
-  _queueKey(){return 'minimal-slideshow-queue:'+ (this._config.source||'minimal_slideshow')+':'+(this._config.album_id||'default')+':'+JSON.stringify(this._config.images||[]);}
+  _queueKey(){return 'minimal-slideshow-queue:'+(this._hass?.user?.id||'preview')+':'+ (this._config.source||'minimal_slideshow')+':'+(this._config.album_id||'default')+':'+JSON.stringify(this._config.images||[]);}
   _api(){return this._config?.source==='origami_photos'?'origami_photos':'minimal_slideshow';}
   _saveQueue(){
     try{sessionStorage.setItem(this._queueKey(),JSON.stringify({ids:this._queue,cursor:this._cursor}));}catch{}
@@ -80,63 +110,91 @@ export class OrigamiAlbumCard extends HTMLElement {
   _shuffle(ids){
     const result=ids.slice();for(let i=result.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[result[i],result[j]]=[result[j],result[i]];}return result;
   }
+  _bufferKey(){return `${this._hass?.user?.id||'preview'}:${this._queueKey()}:${this._config.effect||'origami'}`;}
+  _saveBuffer(){
+    if(!this._config||!this._current?.length||!this._photos.length)return;
+    const current=this._current.map(tile=>({id:tile.photo.id,rect:tile.rect.slice()}));
+    const ordered=[...new Set([...this._current.map(tile=>tile.photo),...this._photos])];
+    let bytes=0;const photos=[];
+    for(const photo of ordered){
+      if(!photo.blob||bytes+photo.blob.size>BUFFER_BYTES)continue;
+      const {url,...copy}=photo;photos.push(copy);bytes+=photo.blob.size;
+    }
+    if(current.some(tile=>!photos.some(photo=>photo.id===tile.id)))return;
+    const key=this._bufferKey();clearTimeout(photoBuffers.get(key)?.expiry);photoBuffers.delete(key);
+    const entry={photos,current,catalog:this._catalog?new Map(this._catalog):null,catalogTime:this._catalogTime,queue:this._queue?.slice(),cursor:this._cursor,resolvedAlbum:this._resolvedAlbum,turn:this._turn,bytes,savedAt:Date.now()};
+    entry.expiry=setTimeout(()=>{if(photoBuffers.get(key)===entry)photoBuffers.delete(key);},BUFFER_TTL);
+    photoBuffers.set(key,entry);trimPhotoBuffers();
+  }
+  _restoreBuffer(){
+    if(this._bufferChecked)return;this._bufferChecked=true;trimPhotoBuffers();
+    const saved=photoBuffers.get(this._bufferKey());if(!saved)return;
+    this._photos=saved.photos.map(photo=>({...photo,url:URL.createObjectURL(photo.blob)}));
+    this._catalog=saved.catalog?new Map(saved.catalog):null;this._catalogTime=saved.catalogTime;
+    this._queue=saved.queue?.slice();this._cursor=saved.cursor;this._resolvedAlbum=saved.resolvedAlbum;this._turn=saved.turn;
+    this._current=saved.current.map(tile=>({rect:tile.rect.slice(),photo:this._photos.find(photo=>photo.id===tile.id)}));
+    // Recompute square cells and orientation-dependent layouts after rotation.
+    if(this._config.effect==='shifting_tiles')this._current=this._gridTiles();
+    else if(this._mosaicMode()&&this._current.length===1&&!this._screenMatch(this._current[0].photo)&&this._photos.length>1)this._current=this._chooseLayout();
+    this._scene.replaceChildren(this._render(this._current));this._status.hidden=true;this._remember();
+  }
+  async _fetchPhoto(id,serial){
+    const request=new AbortController();this._requests??=new Set();this._requests.add(request);
+    const timeout=setTimeout(()=>request.abort(),15000);let objectURL;
+    try{
+      const direct=this._catalog.get(id)?.url;let response;
+      if(direct){const url=new URL(direct,location.origin);if(!['http:','https:'].includes(url.protocol))throw new Error('Use an HTTP image URL');response=await fetch(url,{signal:request.signal,credentials:url.origin===location.origin?'same-origin':'omit'});}
+      else response=await this._hass.fetchWithAuth(`/api/${this._api()}/image/${encodeURIComponent(id)}${this._config.album_id?'?entry_id='+encodeURIComponent(this._config.album_id):''}`,{signal:request.signal});
+      if(!response.ok)throw new Error('Photo temporarily unavailable');
+      const blob=await response.blob();objectURL=URL.createObjectURL(blob);const img=new Image();img.src=objectURL;await img.decode();
+      if(serial!==this._serial||!this.isConnected)return;
+      const photo={id,blob,url:objectURL,width:img.naturalWidth,height:img.naturalHeight};this._photos.push(photo);objectURL=null;this._failedPhotos?.delete(id);
+      if(!this._current){const first=this._initialComposition();if(first){this._current=first;for(const tile of first)tile.photo.lastShown=this._turn;this._scene.replaceChildren(this._render(first));this._status.hidden=true;this._remember();}}
+    }catch{
+      if(serial===this._serial){this._failedPhotos??=new Map();this._failedPhotos.set(id,Date.now()+30000);}
+    }finally{clearTimeout(timeout);this._requests.delete(request);if(objectURL)URL.revokeObjectURL(objectURL);}
+  }
   async _load(){
     if(!this.isConnected||!this._visible||document.hidden||!this._config||!this._hass||this._loading)return;
-    this._loading=true;const serial=this._serial;
+    this._restoreBuffer();
+    if(Date.now()<(this._nextLoad||0)){clearTimeout(this._prefetch);this._prefetch=setTimeout(()=>this._load(),this._nextLoad-Date.now());return;}
+    this._loading=true;const serial=this._serial;let retry=4000;
     try{
-      if(this._catalog&&Date.now()-(this._catalogTime||0)>7200000)this._catalog=null;
-      if(!this._catalog){
+      if(!this._catalog||Date.now()-(this._catalogTime||0)>7200000){
         const result=this._config.images?.length?{photos:this._config.images.map((item,i)=>({id:String(i),url:typeof item==='string'?item:item.url}))}:await this._hass.callApi('GET',this._api()+'/catalog'+(this._config.album_id?'?entry_id='+encodeURIComponent(this._config.album_id):''));
         if(serial!==this._serial)return;
-        this._catalogTime=Date.now();this._resolvedAlbum=result.entry_id||this._config.album_id;
-        this._catalog=new Map(result.photos.map(p=>[p.id,p]));
-        if(!this._catalog.size)throw new Error('Empty album');
+        const catalog=new Map(result.photos.map(photo=>[photo.id,photo]));if(!catalog.size)throw new Error('Empty album');
+        this._catalog=catalog;this._catalogTime=Date.now();this._resolvedAlbum=result.entry_id||this._config.album_id;
         let saved;try{saved=JSON.parse(sessionStorage.getItem(this._queueKey()));}catch{}
         if(saved?.ids?.length&&Number.isInteger(saved.cursor)&&saved.cursor>=0){
-          this._queue=saved.ids.filter(id=>this._catalog.has(id));
-          this._cursor=Math.min(saved.cursor,this._queue.length);
-          const known=new Set(this._queue);this._queue.push(...this._shuffle([...this._catalog.keys()].filter(id=>!known.has(id))));
-        }else{this._queue=this._shuffle([...this._catalog.keys()]);this._cursor=0;}
+          this._queue=saved.ids.filter(id=>catalog.has(id));this._cursor=Math.min(saved.cursor,this._queue.length);
+          const known=new Set(this._queue);this._queue.push(...this._shuffle([...catalog.keys()].filter(id=>!known.has(id))));
+        }else{this._queue=this._shuffle([...catalog.keys()]);this._cursor=0;}
       }
-      // Keep a small decoded buffer. The queue is the whole album, not the last camera frame.
-      let attempts=0;
-      while(this.isConnected&&this._visible&&!document.hidden&&serial===this._serial&&this._photos.filter(p=>p.lastShown===undefined).length<6&&attempts++<8){
-        this._prune();
-        if(this._cursor>=this._queue.length){this._queue=this._shuffle([...this._catalog.keys()]);this._cursor=0;}
-        const id=this._queue[this._cursor++];this._saveQueue();
-        if(this._photos.some(p=>p.id===id))continue;
-        const request=this._request=new AbortController();
-        const timeout=setTimeout(()=>request.abort(),30000);
-        let objectURL;
-        try{
-          const direct=this._catalog.get(id)?.url;
-          let response;
-          if(direct){const url=new URL(direct,location.origin);if(!['http:','https:'].includes(url.protocol))throw new Error('Use an HTTP image URL');response=await fetch(url,{signal:request.signal,credentials:url.origin===location.origin?'same-origin':'omit'});}
-          else response=await this._hass.fetchWithAuth(`/api/${this._api()}/image/${encodeURIComponent(id)}${this._config.album_id?'?entry_id='+encodeURIComponent(this._config.album_id):''}`,{signal:request.signal});
-          if(!response.ok)throw new Error('Photo temporarily unavailable');
-          const blob=await response.blob();
-          objectURL=URL.createObjectURL(blob);const img=new Image();img.src=objectURL;await img.decode();
-          if(serial!==this._serial||!this.isConnected){URL.revokeObjectURL(objectURL);return;}
-          const photo={id,url:objectURL,width:img.naturalWidth,height:img.naturalHeight};
-          this._photos.push(photo);objectURL=null;
-          this._status.hidden=true;
-          if(!this._current){const first=this._initialComposition();if(first){this._current=first;for(const tile of first)tile.photo.lastShown=this._turn;this._scene.replaceChildren(this._render(first));this._remember();}else this._message('Preparing your photo layout…');}
-        }catch(error){
-          if(objectURL)URL.revokeObjectURL(objectURL);
-          if(serial!==this._serial)return;
-        }finally{clearTimeout(timeout);}
+      const target=this._config.effect==='shifting_tiles'?10:6;
+      // Three simultaneous downloads keep a slow photo from blocking the buffer.
+      for(let batch=0;batch<4&&this.isConnected&&this._visible&&!document.hidden&&serial===this._serial;batch++){
+        this._prune();const missing=target-this._photos.filter(photo=>photo.lastShown===undefined).length;if(missing<=0)break;
+        const ids=[];let scanned=0;
+        while(ids.length<Math.min(3,missing)&&scanned++<this._queue.length){
+          if(this._cursor>=this._queue.length){this._queue=this._shuffle([...this._catalog.keys()]);this._cursor=0;}
+          const id=this._queue[this._cursor++];
+          if(!ids.includes(id)&&!this._photos.some(photo=>photo.id===id)&&Date.now()>=(this._failedPhotos?.get(id)||0))ids.push(id);
+        }
+        this._saveQueue();if(!ids.length)break;
+        await Promise.all(ids.map(id=>this._fetchPhoto(id,serial)));
       }
-      if(!this._photos.length)this._message('Loading photos from your source…');
+      if(serial!==this._serial)return;
+      if(!this._current)this._message(this._photos.length?'Preparing your photo layout…':'Loading photos from your source…');
       this._prune();
     }catch{
-      if(serial===this._serial&&!this._photos.length)this._message('Connecting to your photo source…');
+      retry=15000;
+      if(serial===this._serial&&!this._current)this._message('Connecting to your photo source…');
     }finally{
       if(serial===this._serial){
-        this._loading=null;
-        this._stage.dataset.buffer=String(this._photos.length);
-        this._stage.dataset.catalog=String(this._catalog?.size||0);
-        clearTimeout(this._prefetch);
-        if(this.isConnected&&this._visible&&!document.hidden)this._prefetch=setTimeout(()=>this._load(),4000);
+        this._loading=null;this._nextLoad=Date.now()+retry;
+        this._stage.dataset.buffer=String(this._photos.length);this._stage.dataset.catalog=String(this._catalog?.size||0);
+        clearTimeout(this._prefetch);if(this.isConnected&&this._visible&&!document.hidden)this._prefetch=setTimeout(()=>this._load(),retry);
       }
     }
   }
@@ -319,9 +377,9 @@ export class OrigamiAlbumCard extends HTMLElement {
       const direct=this._catalog?.get(id)?.url;
       const response=direct?await fetch(new URL(direct,location.origin),{signal:controller.signal,credentials:'same-origin'}):await this._hass.fetchWithAuth(`/api/${this._api()}/image/${encodeURIComponent(id)}${this._config.album_id?'?entry_id='+encodeURIComponent(this._config.album_id):''}`,{signal:controller.signal});
       if(!response.ok)throw new Error('Photo unavailable');
-      url=URL.createObjectURL(await response.blob());const img=new Image();img.src=url;await img.decode();
+      const blob=await response.blob();url=URL.createObjectURL(blob);const img=new Image();img.src=url;await img.decode();
       if(serial!==this._serial||!this.isConnected)throw new Error('Cancelled');
-      const photo={id,url,width:img.naturalWidth,height:img.naturalHeight,lastShown:this._turn};this._photos.push(photo);url=null;return photo;
+      const photo={id,blob,url,width:img.naturalWidth,height:img.naturalHeight,lastShown:this._turn};this._photos.push(photo);url=null;return photo;
     }finally{clearTimeout(timeout);if(url)URL.revokeObjectURL(url);}
   }
   async _restoreHistory(index){
@@ -336,19 +394,32 @@ export class OrigamiAlbumCard extends HTMLElement {
     if(!this.isConnected||!this._config)return;
     this._finish();clearTimeout(this._timer);
     if(command==='restart'){
-      this._cursor=0;this._saveQueue();this._stopAmbient?.();this._clear();this._turn=0;
-      await this._load();this._schedule();return;
+      this._cursor=0;this._saveQueue();this._stopAmbient?.();this._turn=0;this._history=[];this._historyIndex=-1;
+      const firstId=this._queue?.[0];
+      try{if(firstId){const photo=await this._historyPhoto(firstId);this._photos=[photo,...this._photos.filter(item=>item!==photo)];for(const item of this._photos)delete item.lastShown;const first=this._initialComposition();if(first){this._current=first;for(const tile of first)tile.photo.lastShown=0;this._scene.replaceChildren(this._render(first));this._status.hidden=true;}}}finally{this._remember();this._schedule();this._load();}return;
     }
     if(command==='previous'){await this._restoreHistory(Math.max(0,this._historyIndex-1));return;}
     if(this._historyIndex<this._history.length-1){await this._restoreHistory(this._historyIndex+1);return;}
     await this._transition();
   }
-  _exit(){
-    if(location.search.includes('edit')||this._config?.tap_action==='none')return;
-    const action=this._config?.tap_action;
-    this.dispatchEvent(new CustomEvent('minimal-slideshow-tap',{bubbles:true,composed:true}));
-    const path=typeof action==='object'&&action.action==='navigate'?action.navigation_path:this._config?.home_path;
-    if(typeof path==='string'&&path.startsWith('/')&&!path.startsWith('//')){history.pushState(null,'',path);window.dispatchEvent(new Event('location-changed'));}
+  _hasAction(gesture){return !!this._config?.[`${gesture}_action`]&&this._config[`${gesture}_action`].action!=='none';}
+  async _bindActions(){
+    const active=['tap','hold','double_tap'].some(gesture=>this._hasAction(gesture));
+    this._stage.tabIndex=active?0:-1;this._stage.style.cursor=active?'pointer':'default';
+    if(active)this._stage.setAttribute('role','button');else this._stage.removeAttribute('role');
+    if(!this.isConnected)return;
+    try{
+      if(!customElements.get('action-handler'))await nativeButtonCard();
+      if(!this.isConnected||!customElements.get('action-handler'))return;
+      let handler=document.body.querySelector('action-handler');
+      if(!handler){handler=document.createElement('action-handler');document.body.append(handler);}
+      this._actionHandler=handler;
+      handler.bind(this._stage,{hasHold:this._hasAction('hold'),hasDoubleClick:this._hasAction('double_tap'),disabled:!['tap','hold','double_tap'].some(gesture=>this._hasAction(gesture))});
+    }catch(error){console.warn('Minimal Photo Slideshow: unable to load Home Assistant action controls.',error);}
+  }
+  _handleAction(gesture){
+    if(!this.isConnected||this.editMode||new URLSearchParams(location.search).has('edit')||!['tap','hold','double_tap'].includes(gesture)||!this._hasAction(gesture))return;
+    this.dispatchEvent(new CustomEvent('hass-action',{detail:{config:this._config,action:gesture},bubbles:true,composed:true}));
   }
 
   getCardSize(){return 8;}
@@ -455,20 +526,14 @@ export class MinimalPhotoSlideshow extends OrigamiAlbumCard {
       const keep=current.filter((_,i)=>!changing.has(i));
       return this._compose(current.map(p=>p.rect),keep);
     }
-    if(effect==='shifting_tiles'&&this._photos.length>=9)return this._tileComposition();
+    if(effect==='shifting_tiles'&&this._photos.length>=4)return this._tileComposition();
     const sequence=[10,11,5,3,12,6,4,2];
     const rectangles=layouts[sequence[Math.floor(this._turn/4)%sequence.length]];
     if(rectangles.length>this._photos.length)return this._chooseLayout();
     const keep=current.filter(p=>rectangles.some(r=>sameRect(r,p.rect))).slice(0,rectangles.length-1);
     return this._compose(rectangles,keep);
   }
-  _tileComposition(){
-    const corner=Math.floor(this._turn/4)%4,hx=corner%2?2:0,hy=corner<2?0:1;
-    const rectangles=[[hx/4,hy/3,.5,2/3]];
-    for(let y=0;y<3;y++)for(let x=0;x<4;x++)if(!(x>=hx&&x<hx+2&&y>=hy&&y<hy+2))rectangles.push([x/4,y/3,.25,1/3]);
-    const keep=this._current.filter(p=>rectangles.some(r=>sameRect(r,p.rect))).slice(0,8);
-    return this._compose(rectangles,keep);
-  }
+  _tileComposition(){return this._gridTiles();}
   _maskPlan(){
     const stable=this._current.filter(old=>this._next.some(n=>n.photo===old.photo&&sameRect(n.rect,old.rect)));
     const old=this._current.filter(p=>!stable.includes(p));
@@ -504,11 +569,105 @@ export class MinimalPhotoSlideshow extends OrigamiAlbumCard {
     const open=incoming.map((node,i)=>animate(node,[{clipPath:shut(i)},{clipPath:full}],d*.52,d*.48));
     await Promise.all([...close,...open]);
   }
+  _tileLayouts(){
+    const W=Math.max(1,this._stage.clientWidth),H=Math.max(1,this._stage.clientHeight);
+    const portrait=H>W,ratio=portrait?H/W:W/H;
+    // Square cells are sized in screen pixels, with the remaining area assigned
+    // to larger photographs. Transpose the compositions for portrait screens.
+    const square=rows=>1/(ratio*rows),s3=square(3),s4=square(4);
+    const column=(x,rows)=>Array.from({length:rows},(_,y)=>[x,y/rows,square(rows),1/rows]);
+    const strip=(y,rows)=>{
+      const w=square(rows),cols=Math.max(2,Math.floor(1/w));
+      return Array.from({length:cols},(_,x)=>[x*w,y,w+(x===cols-1?1-cols*w:0),1/rows]);
+    };
+    const twoColumns=[...column(0,3),...column(s3,3)];
+    const largeWidth=1-2*s3;
+    const choices=[
+      [[0,0,(1-s3)/2,1],[(1-s3)/2,0,(1-s3)/2,1],...column(1-s3,3)],
+      [...twoColumns,[2*s3,0,largeWidth,1]],
+      [[0,0,largeWidth,2/3],[largeWidth,0,s3,1/3],[largeWidth+s3,0,s3,1/3],[largeWidth,1/3,s3,1/3],[largeWidth+s3,1/3,s3,1/3],...strip(2/3,3)],
+      [[0,0,1-s4,1],...column(1-s4,4)],
+      [...strip(0,2),...strip(.5,2)],
+      [[0,0,.4,2/3],[.4,0,.6,2/3],...strip(2/3,3)]
+    ];
+    return choices.filter(rects=>rects.length<=Math.min(12,this._photos.length)&&rects.every(r=>r[2]>.01)).map(rects=>rects.map(([x,y,w,h])=>portrait?[y,x,h,w]:[x,y,w,h]));
+  }
   _gridTiles(){
-    const landscape=this._stage.clientWidth>=this._stage.clientHeight;
-    const count=this._photos.length>=6?6:4,cols=count===4?2:landscape?3:2,rows=count/cols;
-    const rects=Array.from({length:count},(_,i)=>[(i%cols)/cols,Math.floor(i/cols)/rows,1/cols,1/rows]);
-    return this._compose(rects);
+    const choices=this._tileLayouts();
+    if(!choices.length)return this._compose(layouts[6]);
+    return this._compose(choices[Math.floor(this._turn/6)%choices.length]);
+  }
+  async _shiftTileLayout(motionId){
+    this._next=this._gridTiles();this._stage.dataset.transition='tile-layout-slide-bounce';
+    const group=this._render(this._current);this._scene.replaceChildren(group);
+    const d=this._config.duration;
+    const animate=(node,frames,options)=>{const a=node.animate(frames,{...options,fill:'both'});this._animations.push(a);return a.finished;};
+    try{
+      await Promise.all([...group.children].map(node=>animate(node,[{transform:'scale(1)',opacity:1},{transform:'scale(.02)',opacity:0}],{duration:d*.28,easing:'ease-in'})));
+      if(motionId!==this._motionId)return;
+      const incoming=this._render(this._next);this._scene.replaceChildren(incoming);
+      const axis=Math.floor(this._turn/6)%2,sign=Math.floor(this._turn/12)%2?1:-1;
+      const distance=(axis?this._stage.clientHeight:this._stage.clientWidth)*sign;
+      const transform=n=>axis?`translate(0,${n}px)`:`translate(${n}px,0)`;
+      await animate(incoming,[{transform:transform(distance),offset:0},{transform:transform(distance*.04),offset:.68},{transform:transform(0),offset:.8},{transform:transform(distance*.025),offset:.9},{transform:transform(0),offset:1}],{duration:d*.72,easing:'ease-out'});
+    }catch{return;}
+    if(motionId!==this._motionId)return;
+    this._finish();this._prune();this._load();this._schedule();
+  }
+  _tileRepartitionPlan(){
+    const tiles=this._current,eps=.00001,candidates=[];
+    const edge=rect=>rect[0]<eps?[0,-1]:rect[0]+rect[2]>1-eps?[0,1]:rect[1]<eps?[1,-1]:rect[1]+rect[3]>1-eps?[1,1]:null;
+    const make=(removed,rectangles,region,kind)=>{
+      const direction=edge(region);if(!direction||tiles.length-removed.length+rectangles.length>Math.min(12,this._photos.length))return;
+      const stable=tiles.filter(tile=>!removed.includes(tile));
+      const result=this._assignment([...stable.map(tile=>tile.rect),...rectangles],stable);
+      if(result)candidates.push({stable,removed,added:result.composition.slice(stable.length),next:result.composition,region,direction,kind});
+    };
+    const splitTurn=Math.floor(this._turn/3)%2===1;
+    if(splitTurn){
+      const minArea=Math.min(...tiles.map(tile=>tile.rect[2]*tile.rect[3]));
+      for(const tile of tiles){
+        const [x,y,w,h]=tile.rect;if(tiles.length>1&&w*h<minArea*1.4)continue;
+        const width=w*this._stage.clientWidth,height=h*this._stage.clientHeight;
+        if(Math.floor(this._turn/3)%4===3&&w*h>.18&&Math.max(width/height,height/width)<2.2){
+          make([tile],[[x,y,w/2,h/2],[x+w/2,y,w/2,h/2],[x,y+h/2,w/2,h/2],[x+w/2,y+h/2,w/2,h/2]],tile.rect,'one-to-four');
+        }
+        make([tile],width>=height?[[x,y,w/2,h],[x+w/2,y,w/2,h]]:[[x,y,w,h/2],[x,y+h/2,w,h/2]],tile.rect,'one-to-two');
+      }
+    }else{
+      for(let i=0;i<tiles.length;i++)for(let j=i+1;j<tiles.length;j++){
+        const a=tiles[i].rect,b=tiles[j].rect;
+        for(const axis of [0,1]){
+          const other=1-axis;
+          if(Math.abs(a[other]-b[other])>eps||Math.abs(a[other+2]-b[other+2])>eps)continue;
+          if(Math.abs(a[axis]+a[axis+2]-b[axis])>eps&&Math.abs(b[axis]+b[axis+2]-a[axis])>eps)continue;
+          const merged=a.slice();merged[axis]=Math.min(a[axis],b[axis]);merged[axis+2]=a[axis+2]+b[axis+2];
+          make([tiles[i],tiles[j]],[merged],merged,'two-to-one');
+        }
+      }
+    }
+    // Favor four-cell splits on their turn; otherwise alternate eligible regions.
+    const preferred=candidates.filter(plan=>plan.kind==='one-to-four');
+    const pool=preferred.length?preferred:candidates;
+    return pool.length?pool[Math.floor(this._turn/3)%pool.length]:null;
+  }
+  async _repartitionTiles(plan,motionId){
+    this._next=plan.next;this._stage.dataset.transition=plan.kind;
+    const group=this._render(this._current);this._scene.replaceChildren(group);
+    const d=this._config.duration;
+    const animate=(node,frames,options)=>{const a=node.animate(frames,{...options,fill:'both'});this._animations.push(a);return a.finished;};
+    try{
+      const outgoing=plan.removed.map(tile=>group.children[this._current.indexOf(tile)]);
+      await Promise.all(outgoing.map(node=>animate(node,[{transform:'scale(1)',opacity:1},{transform:'scale(.02)',opacity:0}],{duration:d*.28,easing:'ease-in'})));
+      if(motionId!==this._motionId)return;
+      outgoing.forEach(node=>node.style.visibility='hidden');
+      const incoming=this._render(plan.added);this._scene.append(incoming);
+      const [axis,sign]=plan.direction,distance=plan.region[axis+2]*(axis?this._stage.clientHeight:this._stage.clientWidth)*sign;
+      const transform=n=>axis?`translate(0,${n}px)`:`translate(${n}px,0)`;
+      await animate(incoming,[{transform:transform(distance),offset:0},{transform:transform(distance*.04),offset:.68},{transform:transform(0),offset:.8},{transform:transform(distance*.025),offset:.9},{transform:transform(0),offset:1}],{duration:d*.72,easing:'ease-out'});
+    }catch{return;}
+    if(motionId!==this._motionId)return;
+    this._finish();this._prune();this._load();this._schedule();
   }
   _tileChains(){
     const candidates=[],eps=.00001,tiles=this._current;
@@ -516,7 +675,7 @@ export class MinimalPhotoSlideshow extends OrigamiAlbumCard {
       const chain=[first];let index=first;
       while(chain.length<=tiles.length){
         const r=tiles[index].rect,edge=sign<0?r[axis]:r[axis]+r[axis+2];
-        if(Math.abs(edge-(sign<0?0:1))<eps){if(chain.length>1)candidates.push({chain,axis,sign});break;}
+        if(Math.abs(edge-(sign<0?0:1))<eps){candidates.push({chain,axis,sign});break;}
         const next=tiles.findIndex((p,j)=>!chain.includes(j)&&Math.abs(p.rect[axis]-(r[axis]+sign*r[axis+2]))<eps&&Math.abs(p.rect[1-axis]-r[1-axis])<eps&&Math.abs(p.rect[2]-r[2])<eps&&Math.abs(p.rect[3]-r[3])<eps);
         if(next<0)break;chain.push(next);index=next;
       }
@@ -524,8 +683,15 @@ export class MinimalPhotoSlideshow extends OrigamiAlbumCard {
   }
   async _shiftTiles(){
     clearTimeout(this._timer);this._finish();const motionId=this._motionId;this._turn++;
-    const candidates=this._tileChains();if(!candidates.length){this._schedule();return;}
-    const first=candidates[this._turn%candidates.length],paths=[first];
+    const candidates=this._tileChains();
+    if(!candidates.length)return this._shiftTileLayout(motionId);
+    const repartition=this._turn%3===0?this._tileRepartitionPlan():null;
+    if(repartition)return this._repartitionTiles(repartition,motionId);
+    const areas=this._current.map(tile=>tile.rect[2]*tile.rect[3]),largest=Math.max(...areas),smallest=Math.min(...areas);
+    const heroes=candidates.filter(path=>path.chain.length===1&&areas[path.chain[0]]>=largest-.00001);
+    const chains=candidates.filter(path=>path.chain.length>1);
+    const pool=this._turn%3===1&&largest>smallest*1.4&&heroes.length?heroes:chains.length?chains:candidates;
+    const first=pool[this._turn%pool.length],paths=[first];
     if(this._turn%3===0){const second=candidates.find(p=>p.axis===first.axis&&p.sign===first.sign&&!p.chain.some(i=>first.chain.includes(i)));if(second)paths.push(second);}
     const before=this._current,thisNext=before.map(p=>({photo:p.photo,rect:p.rect.slice()}));
     const fresh=this._photos.filter(p=>!before.some(t=>t.photo===p)).sort((a,b)=>(a.lastShown??-999)-(b.lastShown??-999));
@@ -587,47 +753,66 @@ export class MinimalPhotoSlideshow extends OrigamiAlbumCard {
 
 export class MinimalPhotoSlideshowEditor extends HTMLElement {
   constructor(){super();this.attachShadow({mode:'open'});}
-  setConfig(config){const {slideshow_minutes,...portable}=config;this._config={...MinimalPhotoSlideshow.getStubConfig(),...portable};this._render();}
+  setConfig(config){this._config={...MinimalPhotoSlideshow.getStubConfig(),...normalizeActions(config)};this._render();}
   set hass(hass){
-    this._hass=hass;
-    if(!this._albumRequest){this._albumRequest=true;hass.callApi('GET','minimal_slideshow/albums').then(result=>{this._albums=result.albums||[];if(this._config)this._render();}).catch(()=>{});}
+    this._hass=hass;if(this._form)this._form.hass=hass;if(this._sourceForm)this._sourceForm.hass=hass;
+    if(!this._albumRequest){this._albumRequest=true;hass.callApi('GET','minimal_slideshow/albums').then(result=>{this._albums=result.albums||[];this._render();}).catch(()=>{this._albums=[];this._render();});}
+    this._render();
   }
-  _render(){
-    this.shadowRoot.innerHTML=`<style>
-      :host{display:block;container-type:inline-size;color:var(--primary-text-color,#eee);font:14px system-ui}.fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.wide{grid-column:1/-1}label{display:flex;min-width:0;flex-direction:column;gap:7px}input,select,textarea{box-sizing:border-box;min-width:0;width:100%;min-height:44px;border-radius:10px;border:1px solid var(--divider-color,#555);background:var(--card-background-color,#222);color:inherit;padding:10px;font:inherit}input[type=checkbox]{width:22px;min-height:22px}.toggle{flex-direction:row;align-items:center;justify-content:space-between;min-height:32px}h3{font-size:15px;margin:22px 0 12px}small,p{color:var(--secondary-text-color,#aaa);font-size:12px;line-height:1.5;margin:4px 0 0}@container(max-width:380px){.fields{grid-template-columns:minmax(0,1fr)}}
-    </style><div class="fields"></div>`;
-    const fields=this.shadowRoot.querySelector('.fields');
-    const add=(key,label,type,options,wide=false)=>{
-      const wrap=document.createElement('label');wrap.className=(wide?'wide ':'')+(type==='checkbox'?'toggle':'');const name=document.createElement('span');name.textContent=label;wrap.append(name);
-      const input=document.createElement(type==='select'?'select':type==='textarea'?'textarea':'input');input.name=key;input.setAttribute('aria-label',label);
-      if(type==='select'){for(const [value,text] of Object.entries(options)){const o=document.createElement('option');o.value=value;o.textContent=text;input.append(o);}}
-      else if(type==='textarea'){input.rows=4;}else{input.type=type;if(type==='number'){input.min=options[0];input.max=options[1];input.step=options[2]||1;}}
-      if(type==='checkbox')input.checked=!!this._config[key];else input.value=key==='images'?(this._config.images||[]).map(p=>typeof p==='string'?p:p.url).join('\n'):this._config[key]??'';
-      input.addEventListener('change',()=>{
-        if(!input.checkValidity())return;
-        let value=type==='checkbox'?input.checked:type==='number'?Number(input.value):key==='images'?input.value.split('\n').map(p=>p.trim()).filter(Boolean):input.value;
-        this._config={...this._config,[key]:value};
-        this.dispatchEvent(new CustomEvent('config-changed',{detail:{config:{...this._config}},bubbles:true,composed:true}));
-        if(['clock','clock_font','source'].includes(key))this._render();
-      });wrap.append(input);fields.append(wrap);
-    };
-    if(this._config?.source==='origami_photos')add('source','Photo source','select',{minimal_slideshow:'Minimal Slideshow integration',origami_photos:'Legacy Origami integration'},true);
-    if(this._config.source!=='origami_photos')add('album_id','Photo source','select',{'':'First configured source',...Object.fromEntries((this._albums||[]).map(a=>[a.entry_id,a.title]))},true);
-    add('images','Image URLs (optional, one per line; overrides album)','textarea',null,true);
-    add('height','Card height (optional, e.g. 100dvh or 600px)','text',null,true);
-    add('effect','Slideshow style','select',EFFECTS,true);
-    add('interval','Photo hold / movement pace (seconds)','number',[2,120,1]);
-    add('duration','Transition duration (milliseconds)','number',[250,6000,50]);
-    add('home_path','Navigate on tap (optional path)','text',null,true);
-    add('clock','Show clock','checkbox',null,true);
-    if(this._config.clock){
-      add('clock_position','Clock position','select',{'bottom-left':'Bottom left','top-left':'Top left','bottom-right':'Bottom right','top-right':'Top right'});
-      add('clock_font','Clock font','select',{system:'System · light',sans:'Sans serif',rounded:'Rounded',serif:'Serif',mono:'Monospace',custom:'Custom font'});
-      if(this._config.clock_font==='custom')add('custom_font','Installed font family','text',null,true);
-      add('clock_size','Clock size (pixels)','number',[40,240,4]);
-      add('time_format','Time format','select',{'auto':'Automatic','24':'24-hour','12':'12-hour'});
-      add('show_date','Show date underneath','checkbox',null,true);
+  connectedCallback(){this._render();}
+  async _render(){
+    if(!this._config||!this.isConnected)return;
+    if(!customElements.get('ha-form')){
+      if(this._formLoading)return;
+      this._formLoading=true;
+      try{const Card=await nativeButtonCard();await Card?.getConfigElement?.();}
+      catch(error){console.warn('Minimal Photo Slideshow: unable to load Home Assistant form controls.',error);}
+      finally{this._formLoading=false;}
+      if(!this.isConnected||!customElements.get('ha-form'))return;
     }
+    if(!this._form){
+      this.shadowRoot.innerHTML='<style>:host{display:block}ha-form{display:block}p{font-size:var(--ha-font-size-s,14px);color:var(--secondary-text-color);margin:8px 0 20px}a{color:var(--primary-color)}</style>';
+      this._sourceForm=document.createElement('ha-form');this._sourceHelp=document.createElement('p');
+      this._form=document.createElement('ha-form');this.shadowRoot.append(this._sourceForm,this._sourceHelp,this._form);
+      const changed=event=>{
+        event.stopPropagation();
+        // Preserve object-style image entries and unrelated YAML keys.
+        const {image_urls,...data}=event.detail.value;
+        if(image_urls!==undefined&&image_urls!==this._imageText)data.images=image_urls.split('\n').map(url=>url.trim()).filter(Boolean);
+        this._config=normalizeActions({...this._config,...data});
+        this.dispatchEvent(new CustomEvent('config-changed',{detail:{config:{...this._config}},bubbles:true,composed:true}));
+        this._render();
+      };
+      this._sourceForm.addEventListener('value-changed',changed);this._form.addEventListener('value-changed',changed);
+    }
+    const c=this._config;
+    this._imageText=(c.images||[]).map(photo=>typeof photo==='string'?photo:photo.url).join('\n');
+    const select=options=>({select:{mode:'dropdown',options:Object.entries(options).map(([value,label])=>({value,label}))}});
+    const number=(min,max,step=1)=>({number:{min,max,step,mode:'box'}});
+    const field=(name,selector)=>({name,selector});
+    const action= name=>({name,selector:{ui_action:{default_action:'none'}},context:{entity_id:'entity'}});
+    const albums=Object.fromEntries((this._albums||[]).map(album=>[album.entry_id,album.title]));
+    if(c.album_id&&!albums[c.album_id])albums[c.album_id]='Unavailable source — choose another';
+    this._sourceForm.schema=c.source==='origami_photos'?[field('source',select({minimal_slideshow:'Minimal Slideshow integration',origami_photos:'Legacy Origami integration'}))]:[field('album_id',select(albums))];
+    this._sourceForm.data=c;this._sourceForm.hass=this._hass;this._sourceForm.computeLabel=()=> 'Photo source';
+    this._sourceHelp.replaceChildren();
+    if(this._albums?.length===0)this._sourceHelp.append('Please install and set up the Minimal Slideshow integration. ');
+    const link=document.createElement('a');link.href='https://github.com/lukevink/minimal-slideshow-integration#install-with-hacs';link.target='_blank';link.rel='noopener noreferrer';link.textContent='Install and set up the integration';this._sourceHelp.append(link);
+    this._form.schema=[
+      field('image_urls',{text:{multiline:true}}),field('height',{text:{}}),field('effect',select(EFFECTS)),
+      {type:'grid',name:'',schema:[field('interval',number(2,120)),field('duration',number(250,6000,50))]},
+      {type:'expandable',name:'interactions',flatten:true,schema:[field('entity',{entity:{}}),action('tap_action'),action('hold_action'),action('double_tap_action')]},
+      field('clock',{boolean:{}}),
+      ...(c.clock?[
+        {type:'grid',name:'',schema:[field('clock_position',select({'bottom-left':'Bottom left','top-left':'Top left','bottom-right':'Bottom right','top-right':'Top right'})),field('clock_font',select({system:'System · light',sans:'Sans serif',rounded:'Rounded',serif:'Serif',mono:'Monospace',custom:'Custom font'}))]},
+        ...(c.clock_font==='custom'?[field('custom_font',{text:{}})]:[]),
+        {type:'grid',name:'',schema:[field('clock_size',number(40,240,4)),field('time_format',select({auto:'Automatic','24':'24-hour','12':'12-hour'}))]},field('show_date',{boolean:{}})
+      ]:[])
+    ];
+    const labels={source:'Photo source',album_id:'Photo source',image_urls:'Image URLs (optional, one per line)',height:'Card height',effect:'Slideshow style',interval:'Photo hold / movement pace (seconds)',duration:'Transition duration (milliseconds)',interactions:'Interactions',entity:'Entity (optional, for Toggle or More info)',tap_action:'Tap action',hold_action:'Hold action',double_tap_action:'Double-tap action',clock:'Show clock',clock_position:'Clock position',clock_font:'Clock font',custom_font:'Installed font family',clock_size:'Clock size (pixels)',time_format:'Time format',show_date:'Show date underneath'};
+    this._form.computeLabel=schema=>labels[schema.name]||schema.name;
+    this._form.computeHelper=schema=>({height:'Use 100% for a container with a defined height, 100dvh for full screen, or a fixed value such as 500px.',image_urls:'Overrides the integration photo source.'}[schema.name]);
+    this._form.hass=this._hass;this._form.data={...c,image_urls:this._imageText};
   }
 }
 if(!customElements.get('minimal-photo-slideshow-editor'))customElements.define('minimal-photo-slideshow-editor',MinimalPhotoSlideshowEditor);

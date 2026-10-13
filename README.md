@@ -12,7 +12,7 @@ Six animation styles, an optional clock and date, and a visual editor for your H
 | --- | --- |
 | **Origami** | Photos fold into changing grids and full-screen layouts. |
 | **Sliding Panels** | Sliding reveals introduce photos within a mosaic. |
-| **Shifting Tiles** | Tiles shrink, shift and bounce into new arrangements. |
+| **Shifting Tiles** | Tiles split, merge, shift and bounce as the layout evolves. |
 | **Floating** | Large photographs float across the screen. |
 | **Ken Burns** | Gentle zooms and pans with soft dissolves. |
 | **Standard Fade** | A simple crossfade between photographs. |
@@ -72,7 +72,7 @@ height: 100%
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `source` | `minimal_slideshow` | Integration photo source. |
-| `album_id` | First configured album | Choose an integration album in the editor. |
+| `album_id` | Choose a source | Select a configured integration source in the editor. |
 | `images` | None | List of image URLs; overrides the integration source. |
 | `effect` | `origami` | `origami`, `sliding_panels`, `shifting_tiles`, `floating`, `ken_burns`, `fade`. |
 | `interval` | `8` | Hold time/movement pace in seconds, 2–120. Transitions add their own duration. |
@@ -85,7 +85,10 @@ height: 100%
 | `clock_size` | `112` | Maximum font size in pixels, 40–240; scales down on narrow screens. |
 | `time_format` | `auto` | `auto`, `"12"`, or `"24"`. Uses the Home Assistant language/time zone. |
 | `show_date` | `false` | Small date below the clock. |
-| `home_path` | None | Optional local dashboard path to open when tapped. |
+| `tap_action` | `action: none` | Standard Home Assistant tap action. |
+| `hold_action` | `action: none` | Standard Home Assistant hold action. |
+| `double_tap_action` | `action: none` | Standard Home Assistant double-tap action. |
+| `entity` | None | Optional entity for Toggle or More info actions. |
 
 Local images example:
 
@@ -99,6 +102,30 @@ images:
 ```
 
 External image hosts must allow cross-origin requests (CORS). For private photo libraries, use the integration and select your source in the visual editor.
+
+## Tap, hold and double-tap
+
+Open **Interactions** in the visual editor to choose standard Home Assistant actions: Navigate, Open URL, Perform action, More info, Toggle, Assist or None. Set the optional **Entity** for Toggle or More info. Action targets and confirmation prompts use Home Assistant’s standard configuration.
+
+```yaml
+tap_action:
+  action: navigate
+  navigation_path: /lovelace/home
+hold_action:
+  action: more-info
+  entity: sensor.family_photos_photos
+double_tap_action:
+  action: perform-action
+  perform_action: button.press
+  target:
+    entity_id: button.family_photos_next_image
+```
+
+Use your own dashboard path and entity IDs. See [Home Assistant dashboard actions](https://www.home-assistant.io/dashboards/actions/) for all action options. Existing `home_path` settings are converted to Navigate actions when edited.
+
+## Photo buffering
+
+Upcoming photos load in the background while the current layout stays visible. A temporary buffer in the browser tab lets the slideshow resume quickly after navigating away and back. It holds up to two recent sources, with a combined limit of 48 MB, and expires after ten minutes. A full browser refresh starts a fresh buffer.
 
 ## Automation controls
 
