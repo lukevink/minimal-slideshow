@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/brand/icon.png" alt="Minimal Photo Slideshow" width="96" height="96">
+</p>
+
 # Minimal Photo Slideshow
 
 I was looking for a minimal slideshow with modern animations like Apple’s screensavers, with grids and moving photo layouts. So I brought those animations to your Home Assistant dashboard.

@@ -1,5 +1,7 @@
 # 1.3.0
 
+- Add the Minimal Photo Slideshow icon and prepare HACS release packaging.
+
 - Standard Home Assistant tap, hold and double-tap actions, with native action selectors and form controls.
 - Named photo sources and a direct integration setup link in the editor.
 - Shifting Tiles evolves locally: large and small tiles scale away, two tiles merge into one, and one tile splits into two or four.
