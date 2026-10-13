@@ -1,0 +1,19 @@
+name: Release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm test && npm run build
+      - run: gh release upload "$RELEASE_TAG" dist/minimal-slideshow.js --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}

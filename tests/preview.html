@@ -1,0 +1,87 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Minimal Photo Slideshow · Preview</title><style>body{margin:0;background:#090909;color:#eee;font:14px system-ui}header{display:flex;align-items:center;gap:16px;padding:12px 20px;height:38px}select,button{background:#242424;color:white;padding:8px 12px;border:1px solid #555;border-radius:9px}main{display:grid;grid-template-columns:minmax(0,1fr) 340px;height:calc(100vh - 62px)}aside{padding:18px;overflow:auto;background:#171717}minimal-photo-slideshow{min-width:0}#result{font-size:12px} @media(max-width:850px){main{grid-template-columns:1fr}aside{display:none}}</style></head><body><header><b>Minimal Photo Slideshow</b><select id="style" aria-label="Preview style"><option value="origami">Origami</option><option value="sliding_panels">Sliding Panels</option><option value="shifting_tiles">Shifting Tiles</option><option value="floating">Floating</option><option value="ken_burns">Ken Burns</option><option value="fade">Standard Fade</option></select><button id="next">Next</button><button id="test">Test all styles</button><button id="controls">Test HA controls</button><button id="geometry">Test masks &amp; tiles</button><span id="result">Loading…</span></header><main><minimal-photo-slideshow></minimal-photo-slideshow><aside><minimal-photo-slideshow-editor></minimal-photo-slideshow-editor></aside></main><script type="module">
+import '../minimal-slideshow.js';
+const card=document.querySelector('minimal-photo-slideshow'),editor=document.querySelector('minimal-photo-slideshow-editor');
+let config={type:'custom:minimal-photo-slideshow',source:'minimal_slideshow',effect:'origami',height:'calc(100dvh - 62px)',interval:5,duration:1400,clock:true,show_date:true,clock_position:'bottom-left',clock_font:'system',clock_size:112,tap_action:'none'};
+const ratios=[.67,.75,1,1.33,1.5,1.78,2.1,.56],ids=Array.from({length:40},(_,i)=>({id:String(i),width:Math.round(ratios[i%8]*900),height:900}));
+let controlListener;card.setConfig(config);card.hass={connection:{subscribeEvents:async(fn)=>{controlListener=fn;return()=>{controlListener=null;};}},states:{},locale:{language:'en-GB'},callApi:async()=>({entry_id:'test-album',photos:ids}),fetchWithAuth:async path=>fetch('./direct-'+path.split('/').at(-1)+'.svg')};editor.setConfig(config);
+editor.addEventListener('config-changed',e=>{config=e.detail.config;card.setConfig(config);document.querySelector('#style').value=config.effect;});
+document.querySelector('#style').onchange=e=>{config={...config,effect:e.target.value};card.setConfig(config);editor.setConfig(config);};
+document.querySelector('#next').onclick=()=>card._transition();
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const waitLoad=async()=>{for(let i=0;i<200&&card._loading;i++)await sleep(20);await card._load();};
+document.querySelector('#test').onclick=async()=>{
+ const out=document.querySelector('#result');document.querySelector('#test').disabled=true;const errors=[];let transitions=0;
+ try{
+ for(const effect of ['origami','sliding_panels','shifting_tiles','floating','ken_burns','fade']){
+  out.textContent='Testing '+effect;card.setConfig({...config,effect,interval:120,duration:250});
+  for(let n=0;n<4;n++){
+   await waitLoad();clearTimeout(card._timer);await card._transition();transitions++;
+   if(effect!=='floating'){
+    const comp=card._current;if(!comp?.length||Math.abs(comp.reduce((s,p)=>s+p.rect[2]*p.rect[3],0)-1)>.001)errors.push(effect+' coverage');
+    if(new Set(comp.map(p=>p.photo.id)).size!==comp.length)errors.push(effect+' repeated tile');
+    if(card._folds.children.length)errors.push(effect+' cleanup');
+   }else if(!card._floating.length)errors.push('floating empty');
+  }
+ }
+ for(const position of ['top-left','top-right','bottom-left','bottom-right']){
+  card.setConfig({...config,effect:'fade',clock:true,show_date:true,clock_position:position,clock_font:'serif'});
+  if(card._clock.hidden||!card._clock.querySelector('time').textContent||card._clock.querySelector('.date').hidden)errors.push('clock '+position);
+  if(card._clock.style[position.startsWith('top')?'top':'bottom']!=='0px')errors.push('clock anchor');
+ }
+ card.setConfig({...config,clock:false});if(!card._clock.hidden)errors.push('clock hidden');
+ card.remove();if(card._floating.length||card._animations.length||card._ambient.length)errors.push('disconnect cleanup');
+ document.querySelector('main').prepend(card);card.setConfig(config);await waitLoad();
+ out.textContent=errors.length?'FAIL: '+errors.join(', '):`PASS · ${transitions} transitions · six styles · four clock corners · cleanup`;
+ }catch(e){out.textContent='FAIL '+e.message;console.error(e);}finally{document.querySelector('#test').disabled=false;}
+};
+document.querySelector('#geometry').onclick=async()=>{
+ const out=document.querySelector('#result'); const errors=new Set();let frames=0,changes=0;
+ document.querySelector('#geometry').disabled=true;
+ const overlaps=(a,b)=>Math.min(a.right,b.right)-Math.max(a.left,b.left)>.6&&Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top)>.6;
+ try{
+ for(const effect of ['sliding_panels','shifting_tiles']){
+  card.setConfig({...config,effect,interval:120,duration:500}); await waitLoad();clearTimeout(card._timer);
+  for(let i=0;i<12;i++){
+   out.textContent='Checking '+effect+' '+(i+1);await waitLoad();clearTimeout(card._timer);
+   const running=card._transition();let done=false;running.finally(()=>done=true);
+   while(!done){
+    const root=card.shadowRoot;
+    const tiles=[...root.querySelectorAll('.scene .photo')].filter(el=>getComputedStyle(el).visibility!=='hidden'&&Number(getComputedStyle(el).opacity)>.01).map(el=>el.getBoundingClientRect());
+    for(let a=0;a<tiles.length;a++)for(let b=a+1;b<tiles.length;b++)if(overlaps(tiles[a],tiles[b]))errors.add(effect+' overlapping tiles');
+    for(const el of root.querySelectorAll('.masked-panel')){
+     if(getComputedStyle(el).transform!=='none')errors.add('Sliding panel moved');
+     if(getComputedStyle(el).overflow!=='hidden')errors.add('Unmasked panel');
+    }
+    for(const img of root.querySelectorAll('.photo img,.masked-panel img'))if(getComputedStyle(img).objectFit!=='cover')errors.add('Photo is not cropped proportionally');
+    frames++;await sleep(16);
+   }
+   await running; changes++;
+   const area=card._current.reduce((sum,p)=>sum+p.rect[2]*p.rect[3],0);
+   if(Math.abs(area-1)>.00001)errors.add(effect+' incomplete coverage');
+  }
+ }
+ for(const position of ['top-left','top-right','bottom-left','bottom-right']){
+  card.setConfig({...config,clock:true,show_date:true,clock_position:position});
+  const time=card._clock.querySelector('time').getBoundingClientRect(),date=card._clock.querySelector('.date').getBoundingClientRect();
+  const edge=position.endsWith('left')?'left':'right';if(Math.abs(time[edge]-date[edge])>.1)errors.add('Clock alignment '+position);
+ }
+ out.textContent=errors.size?'FAIL '+[...errors].join(', '):`PASS · ${changes} mask/tile transitions · ${frames} frames · no overlaps · four clock edges`;
+ }catch(e){out.textContent='FAIL '+e.message;console.error(e);}finally{card.setConfig(config);document.querySelector('#geometry').disabled=false;}
+};
+document.querySelector('#controls').onclick=async()=>{
+ const out=document.querySelector('#result');document.querySelector('#controls').disabled=true;
+ try{
+  card.setConfig({...config,effect:'fade',interval:120,duration:250});await waitLoad();clearTimeout(card._timer);
+  const frame=()=>card._current.map(p=>p.photo.id).join(',');const before=frame();
+  const command=async(action)=>{controlListener({data:{entry_id:'test-album',command:action}});await card._commandQueue;clearTimeout(card._timer);};
+  await command('next');const after=frame();if(after===before)throw new Error('Next did not change the photo');
+  await command('previous');if(frame()!==before)throw new Error('Previous did not restore the preceding frame');
+  await command('next');if(frame()!==after)throw new Error('Next did not restore forward history');
+  controlListener({data:{entry_id:'different-album',command:'next'}});await card._commandQueue;if(frame()!==after)throw new Error('Wrong album was controlled');
+  await command('restart');await waitLoad();if(card._turn!==0||card._historyIndex!==0)throw new Error('Restart did not reset playback');
+  card.remove();if(controlListener!==null)throw new Error('Event subscription leaked');document.querySelector('main').prepend(card);
+  out.textContent='PASS · Next / Previous / Restart · album isolation · unsubscribe';
+ }catch(e){out.textContent='FAIL '+e.message;console.error(e);}finally{card.setConfig(config);document.querySelector('#controls').disabled=false;}
+};
+setTimeout(()=>{const out=document.querySelector('#result');if(out.textContent==='Loading…')out.textContent='Ready · individual photo files';},1500);
+</script></body></html>

@@ -1,0 +1,10 @@
+{
+  "name": "minimal-slideshow",
+  "version": "1.2.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node tests/layout.mjs",
+    "build": "cp minimal-slideshow.js dist/minimal-slideshow.js"
+  }
+}
