@@ -13,6 +13,10 @@ Minimal Photo Slideshow includes six animation styles, an optional clock, and a 
 
 Photos retain their original proportions. Grid modes crop to fill; they prefer photos matching the screen orientation for a single full-screen image. These are independent implementations inspired by the Apple screensavers, not Apple's code or exact replicas.
 
+![Illustrated slideshow grid with a corner clock](docs/slideshow-layout.svg)
+
+*Layout illustration; the card displays your own photos.*
+
 ## Install with HACS
 
 1. In HACS, add `https://github.com/lukevink/minimal-slideshow` as a **Dashboard** custom repository.

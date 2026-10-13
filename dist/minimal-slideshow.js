@@ -69,7 +69,7 @@ export class OrigamiAlbumCard extends HTMLElement {
   _clear(){
     clearTimeout(this._timer);clearTimeout(this._retry);clearTimeout(this._prefetch);this._request?.abort();this._serial++;this._finish();
     for(const p of this._photos)URL.revokeObjectURL(p.url);
-    this._photos=[];this._history=[];this._historyIndex=-1;this._resolvedAlbum=null;this._current=null;this._frame=null;this._loading=null;this._catalog=null;this._scene?.replaceChildren();
+    this._photos=[];this._history=[];this._historyIndex=-1;this._resolvedAlbum=null;this._current=null;this._frame=null;this._loading=null;this._catalog=null;this._scene?.replaceChildren();this._message("Connecting to your album…");
   }
   _message(text){this._status.textContent=text;this._status.hidden=false;}
   _queueKey(){return 'minimal-slideshow-queue:'+ (this._config.source||'minimal_slideshow')+':'+(this._config.album_id||'default')+':'+JSON.stringify(this._config.images||[]);}
@@ -126,10 +126,10 @@ export class OrigamiAlbumCard extends HTMLElement {
           if(serial!==this._serial)return;
         }finally{clearTimeout(timeout);}
       }
-      if(!this._photos.length)this._message('Loading photos from iCloud…');
+      if(!this._photos.length)this._message('Loading photos from your source…');
       this._prune();
     }catch{
-      if(serial===this._serial&&!this._photos.length)this._message('Connecting to the iCloud photo library…');
+      if(serial===this._serial&&!this._photos.length)this._message('Connecting to your photo source…');
     }finally{
       if(serial===this._serial){
         this._loading=null;
