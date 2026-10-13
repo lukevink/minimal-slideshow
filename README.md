@@ -54,7 +54,18 @@ cards:
     time_format: auto
 ```
 
-Select your album in the visual editor. For a tablet with a hidden dashboard header, use `height: 100dvh`. For a card within a dashboard, use a height such as `500px`.
+Select your album in the visual editor. Set **Card height** to suit your dashboard:
+
+- `100%` fills the parent container when that container has a defined height. To fill the remaining space in a column, the dashboard layout must allocate that space to the card.
+- `100dvh` fills the screen height, ideal for a Panel view on a tablet with its dashboard header hidden.
+- `500px` gives the card a fixed height within a dashboard.
+- Leave it blank to use the screen height minus the dashboard header.
+
+For a container that already defines the available height:
+
+```yaml
+height: 100%
+```
 
 ## Options
 
@@ -66,7 +77,7 @@ Select your album in the visual editor. For a tablet with a hidden dashboard hea
 | `effect` | `origami` | `origami`, `sliding_panels`, `shifting_tiles`, `floating`, `ken_burns`, `fade`. |
 | `interval` | `8` | Hold time/movement pace in seconds, 2–120. Transitions add their own duration. |
 | `duration` | `1800` | Transition duration in milliseconds, 250–6000. |
-| `height` | Viewport less header | Any CSS height, e.g. `100dvh` or `500px`. |
+| `height` | Viewport less header | Any CSS height, e.g. `100%` (sized parent), `100dvh` (full screen), or `500px`. |
 | `clock` | `false` | Show a clock. |
 | `clock_position` | `bottom-left` | `top-left`, `top-right`, `bottom-left`, `bottom-right`.  |
 | `clock_font` | `system` | `system`, `sans`, `rounded`, `serif`, `mono`, `custom`. |
